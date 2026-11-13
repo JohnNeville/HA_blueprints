@@ -2038,6 +2038,31 @@ actions:
                                       Required States: {{input_states}},
                                       TEST: {{'PASS' if state_satisfied else 'FAIL'}},
                                     Custom Filter: {{'PASS' if custom_filter else 'FAIL'}},
+                - alias: "Look up GenAI summary for Final Update"
+                  if:
+                    - "{{ final_update and type == 'end' and final_delay | int(0) > 0 }}"
+                  then:
+                    # The GenAI summary is published after the review ends. Wait (within the final delay) for it
+                    # so the final update (gif/clip) keeps the GenAI title and description instead of replacing them.
+                    - wait_for_trigger:
+                        - trigger: mqtt
+                          topic: "{{mqtt_topic}}"
+                          payload: "genai:{{ review_id }}"
+                          value_template: "{{ value_json['type'] }}:{{ value_json['after']['id'] }}"
+                      timeout:
+                        seconds: "{{ final_delay }}"
+                      continue_on_timeout: true
+                    - variables:
+                        final_delay_remaining: "{{ wait.remaining | float(0) }}"
+                        genai_metadata: "{{ (wait.trigger.payload_json['after']['data']['metadata'] if wait.trigger else event['after']['data']['metadata']) | default({}, true) }}"
+                        genai_title: "{{ genai_metadata.title | default('') }}"
+                        genai_shortSummary: "{{ genai_metadata.shortSummary | default('') }}"
+                        genai_threat_level: "{{ genai_metadata.potential_threat_level | int(0) }}"
+                    - if: "{{ genai_title | length > 0 }}"
+                      then:
+                        - variables:
+                            title: !input genai_notification_title
+                            message: "{{ genai_shortSummary }}"
                 - choose:
                     - conditions:
                         - and:
@@ -2095,7 +2120,7 @@ actions:
                                 - "{{ final_update }}"
                               sequence:
                                 - delay:
-                                    seconds: "{{final_delay}}"
+                                    seconds: "{{ final_delay_remaining | default(final_delay) }}"
                         - alias: "Update Notification"
                           sequence:
                             - choose:
@@ -2403,4 +2428,4 @@ actions:
                                         {{ newIds[:250] }}
                                     target:
                                       entity_id: "{{tts_helper}}"
-              until: "{{ not wait.trigger or wait.trigger.payload_json['type'] == 'end' }}"
+              until: "{{ type == 'end' }}"
