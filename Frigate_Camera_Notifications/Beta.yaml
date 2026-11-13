@@ -1135,6 +1135,15 @@ conditions:
           condition: template
           value_template: "{{ not disable_times|length or not now().hour in disable_times|map('int')|list }}"
 actions:
+  - alias: "Debug: GenAI event decision"
+    if:
+      - condition: template
+        value_template: "{{ debug and trigger.id == 'genai-event' }}"
+    then:
+      - action: logbook.log
+        data:
+          name: Frigate GenAI Debug
+          message: "{% set a = trigger.payload_json['after'] %}{% set m = a['data']['metadata'] | default({}, true) | default({}) %}GenAI event ({{ trigger.payload_json['type'] }}) camera={{ camera }} review={{ a['id'] }} detections={{ a['data']['detections'] }} severity={{ severity }} (required {{ input_severity }}) objects={{ objects }} (required {{ labels }}) zones_in_review={{ after_zones }} required_zones={{ zones }} zone_filter_on={{ zone_only }} zone_check={{ 'PASS' if (not zone_only or after_zones | select('in', zones) | list | length > 0) else 'FAIL' }} severity_ok={{ severity_satisfied }} objects_ok={{ objects_satisfied }} home_blocked={{ initial_home }} state_ok={{ state_satisfied }} custom_filter={{ custom_filter }} filters_satisfied={{ filters_satisfied }} title={{ (m['title'] if m is mapping else '') | default('', true) }} threat={{ (m['potential_threat_level'] if m is mapping else '') | default('', true) }} WOULD_SEND={{ filters_satisfied and (not zone_only or after_zones | select('in', zones) | list | length > 0) and (m is mapping and m['title'] is defined) }}"
   - choose:
       - alias: "Silence New Object Notifications"
         conditions:
@@ -1179,7 +1188,7 @@ actions:
               message: "{{ genai_shortSummary }}"
               subtitle: !input subtitle
               group: !input group
-              tag: "{{ id }}"
+              tag: !input tag
               channel: !input channel
               sticky: false
               sound: "none"
