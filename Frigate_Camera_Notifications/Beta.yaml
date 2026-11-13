@@ -695,6 +695,16 @@ blueprint:
               max: 20
               min: 0
               unit_of_measurement: seconds
+        review_lookup:
+          name: Frigate Review Lookup Action (Optional)
+          description: |
+            Action used to fetch a stored review from the Frigate API, so the GenAI summary and the final GIF update can
+            each add to the other whichever arrives second. It is called with `review_id` and must return the review JSON
+            as `content` (a `rest_command` doing a GET on `http://<frigate>:5000/api/review/{{ review_id }}` does this).
+            Leave blank to disable the lookup.
+          default: "rest_command.frigate_get_review"
+          selector:
+            text:
     actions:
       name: |
         # Action Buttons and URLS
@@ -1068,6 +1078,7 @@ variables:
   loiter_timer: !input loiter_timer
   initial_delay: !input initial_delay
   final_delay: !input final_delay
+  review_lookup: !input review_lookup
   fps: "{{ states('sensor.' + camera + '_camera_fps')|int(5) }}"
   state_only: !input state_filter
   input_entity: !input state_entity
@@ -1212,7 +1223,12 @@ actions:
               tv_duration: !input tv_duration
               tv_transparency: !input tv_transparency
               tv_interrupt: !input tv_interrupt
-              attachment: !input attachment
+              attachment_initial: !input attachment
+              attachment_2: !input attachment_2
+              # Frigate builds the review preview GIF from the review start to 8s after its end.
+              # Use the subsequent attachment (GIF) once that window has passed, else the initial one.
+              gif_ready: "{{ attachment_2 | length > 0 and event['after']['end_time'] | float(0) > 0 and now().timestamp() > event['after']['end_time'] | float(0) + 8 }}"
+              attachment: "{{ attachment_2 if gif_ready else attachment_initial }}"
               video: !input video
           - alias: "Send GenAI Notification"
             sequence:
@@ -2038,31 +2054,6 @@ actions:
                                       Required States: {{input_states}},
                                       TEST: {{'PASS' if state_satisfied else 'FAIL'}},
                                     Custom Filter: {{'PASS' if custom_filter else 'FAIL'}},
-                - alias: "Look up GenAI summary for Final Update"
-                  if:
-                    - "{{ final_update and type == 'end' and final_delay | int(0) > 0 }}"
-                  then:
-                    # The GenAI summary is published after the review ends. Wait (within the final delay) for it
-                    # so the final update (gif/clip) keeps the GenAI title and description instead of replacing them.
-                    - wait_for_trigger:
-                        - trigger: mqtt
-                          topic: "{{mqtt_topic}}"
-                          payload: "genai:{{ review_id }}"
-                          value_template: "{{ value_json['type'] }}:{{ value_json['after']['id'] }}"
-                      timeout:
-                        seconds: "{{ final_delay }}"
-                      continue_on_timeout: true
-                    - variables:
-                        final_delay_remaining: "{{ wait.remaining | float(0) }}"
-                        genai_metadata: "{{ (wait.trigger.payload_json['after']['data']['metadata'] if wait.trigger else event['after']['data']['metadata']) | default({}, true) }}"
-                        genai_title: "{{ genai_metadata.title | default('') }}"
-                        genai_shortSummary: "{{ genai_metadata.shortSummary | default('') }}"
-                        genai_threat_level: "{{ genai_metadata.potential_threat_level | int(0) }}"
-                    - if: "{{ genai_title | length > 0 }}"
-                      then:
-                        - variables:
-                            title: !input genai_notification_title
-                            message: "{{ genai_shortSummary }}"
                 - choose:
                     - conditions:
                         - and:
@@ -2120,7 +2111,28 @@ actions:
                                 - "{{ final_update }}"
                               sequence:
                                 - delay:
-                                    seconds: "{{ final_delay_remaining | default(final_delay) }}"
+                                    seconds: "{{final_delay}}"
+                        - alias: "Look up GenAI summary"
+                          if:
+                            - "{{ final_update and event['type'] == 'end' and review_lookup | length > 0 }}"
+                          then:
+                            # The GenAI summary may already be stored by now. If so, keep its title and description
+                            # on the final (GIF/clip) notification instead of replacing them.
+                            - action: "{{ review_lookup }}"
+                              data:
+                                review_id: "{{ review_id }}"
+                              response_variable: review_response
+                              continue_on_error: true
+                            - variables:
+                                genai_metadata: "{{ review_response.content.data.metadata if review_response is defined and review_response.content is mapping and review_response.content.data is mapping and review_response.content.data.metadata is mapping else {} }}"
+                                genai_title: "{{ genai_metadata.title | default('') }}"
+                                genai_shortSummary: "{{ genai_metadata.shortSummary | default('') }}"
+                                genai_threat_level: "{{ genai_metadata.potential_threat_level | int(0) }}"
+                            - if: "{{ genai_title | length > 0 }}"
+                              then:
+                                - variables:
+                                    title: !input genai_notification_title
+                                    message: "{{ genai_shortSummary }}"
                         - alias: "Update Notification"
                           sequence:
                             - choose:
@@ -2428,4 +2440,4 @@ actions:
                                         {{ newIds[:250] }}
                                     target:
                                       entity_id: "{{tts_helper}}"
-              until: "{{ type == 'end' }}"
+              until: "{{ not wait.trigger or wait.trigger.payload_json['type'] == 'end' }}"
